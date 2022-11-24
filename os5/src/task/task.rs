@@ -2,7 +2,7 @@
 
 use super::TaskContext;
 use super::{pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT;
+use crate::config::{BIG_STRIDE, TRAP_CONTEXT};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -39,6 +39,12 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// Application address space
     pub memory_set: MemorySet,
+    /// stride调度中的pass
+    pub pass: usize,
+    /// stride调度中的stride
+    pub stride: usize,
+    /// 优先级
+    pub priority: isize,
     /// Parent process of the current process.
     /// Weak will not affect the reference count of the parent
     pub parent: Option<Weak<TaskControlBlock>>,
@@ -103,6 +109,9 @@ impl TaskControlBlock {
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
+                    pass: 0,
+                    stride: BIG_STRIDE / 16,
+                    priority: 16,
                 })
             },
         };
@@ -148,6 +157,9 @@ impl TaskControlBlock {
         // ---- access parent PCB exclusively
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
+        let priority = parent_inner.priority;
+        let pass = parent_inner.pass;
+        let stride = parent_inner.stride;
         let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT).into())
@@ -170,6 +182,9 @@ impl TaskControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
+                    pass,
+                    stride,
+                    priority,
                 })
             },
         });
@@ -206,11 +221,14 @@ impl TaskControlBlock {
                         trap_cx_ppn,
                         base_size: parent_inner.base_size,
                         task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                        task_status: TaskStatus::Running,
+                        task_status: TaskStatus::Ready,
                         memory_set,
                         parent: Some(Arc::downgrade(self)),
                         children: Vec::new(),
                         exit_code: 0,
+                        pass: 0,
+                        stride: BIG_STRIDE / 16,
+                        priority: 16,
                     })
                 },
             });
@@ -219,7 +237,7 @@ impl TaskControlBlock {
             // **** access children PCB exclusively
             let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
             // trap_cx.kernel_sp = kernel_stack_top;
-            
+
             *trap_cx = TrapContext::app_init_context(
                 entry_point,
                 user_sp,
@@ -227,7 +245,7 @@ impl TaskControlBlock {
                 kernel_stack_top,
                 trap_handler as usize,
             );
-            
+
             // add child
             parent_inner.children.push(task_control_block.clone());
             Ok(())
@@ -235,6 +253,15 @@ impl TaskControlBlock {
             // 申请不到页号
             Err(-1)
         }
+    }
+    pub fn set_priority(self: &Arc<TaskControlBlock>, prio: isize) -> isize {
+        if prio >= 2 && (BIG_STRIDE / prio as usize) >= 2 {
+            let mut inner = self.inner_exclusive_access();
+            inner.priority = prio;
+            inner.stride = BIG_STRIDE / prio as usize;
+            return 0;
+        }
+        -1
     }
 }
 
