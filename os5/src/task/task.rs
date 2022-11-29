@@ -2,14 +2,15 @@
 
 use super::TaskContext;
 use super::{pid_alloc, KernelStack, PidHandle};
-use crate::config::{BIG_STRIDE, TRAP_CONTEXT};
+use crate::config::{BIG_STRIDE, TRAP_CONTEXT, MAX_SYSCALL_NUM};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::syscall::TaskInfo;
+use crate::timer::get_time_us;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
-
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -51,7 +52,10 @@ pub struct TaskControlBlockInner {
     /// A vector containing TCBs of all child processes of the current process
     pub children: Vec<Arc<TaskControlBlock>>,
     /// It is set when active exit or execution error occurs
+    /// 用来实现taskinfo
     pub exit_code: i32,
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    pub time: usize,
 }
 
 /// Simple access to its internal fields
@@ -112,6 +116,8 @@ impl TaskControlBlock {
                     pass: 0,
                     stride: BIG_STRIDE / 16,
                     priority: 16,
+                    syscall_times: [0;MAX_SYSCALL_NUM],
+                    time: 0,
                 })
             },
         };
@@ -160,6 +166,9 @@ impl TaskControlBlock {
         let priority = parent_inner.priority;
         let pass = parent_inner.pass;
         let stride = parent_inner.stride;
+        let time = parent_inner.time;
+        let syscall_times = parent_inner.syscall_times;
+
         let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT).into())
@@ -169,6 +178,7 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = KernelStack::new(&pid_handle);
         let kernel_stack_top = kernel_stack.get_top();
+        
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
@@ -185,6 +195,8 @@ impl TaskControlBlock {
                     pass,
                     stride,
                     priority,
+                    syscall_times,
+                    time,
                 })
             },
         });
@@ -202,7 +214,7 @@ impl TaskControlBlock {
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
-    pub fn spawn(self: &Arc<TaskControlBlock>, elf_data: &[u8]) -> Result<(), isize> {
+    pub fn spawn(self: &Arc<TaskControlBlock>, elf_data: &[u8]) -> Result<Arc<TaskControlBlock>, isize> {
         // ---- access parent PCB exclusively
         let mut parent_inner = self.inner_exclusive_access();
         // alloc a pid and a kernel stack in kernel space
@@ -213,6 +225,16 @@ impl TaskControlBlock {
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
         if let Some(pte) = memory_set.translate(VirtAddr::from(TRAP_CONTEXT).into()) {
             let trap_cx_ppn = pte.ppn();
+            let cx = trap_cx_ppn.get_mut::<TrapContext>();
+
+            *cx = TrapContext::app_init_context(
+                entry_point,
+                user_sp,
+                KERNEL_SPACE.exclusive_access().token(),
+                kernel_stack_top,
+                trap_handler as usize,
+            );
+            // 其实是pcb
             let task_control_block = Arc::new(TaskControlBlock {
                 pid,
                 kernel_stack,
@@ -227,41 +249,38 @@ impl TaskControlBlock {
                         children: Vec::new(),
                         exit_code: 0,
                         pass: 0,
-                        stride: BIG_STRIDE / 16,
+                        stride: BIG_STRIDE / 0x10,
                         priority: 16,
+                        syscall_times: [0;MAX_SYSCALL_NUM],
+                        time: 0,
                     })
                 },
             });
 
-            // modify kernel_sp in trap_cx
-            // **** access children PCB exclusively
-            let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
-            // trap_cx.kernel_sp = kernel_stack_top;
-
-            *trap_cx = TrapContext::app_init_context(
-                entry_point,
-                user_sp,
-                KERNEL_SPACE.exclusive_access().token(),
-                kernel_stack_top,
-                trap_handler as usize,
-            );
-
             // add child
             parent_inner.children.push(task_control_block.clone());
-            Ok(())
+            Ok(task_control_block)
         } else {
             // 申请不到页号
             Err(-1)
         }
     }
     pub fn set_priority(self: &Arc<TaskControlBlock>, prio: isize) -> isize {
-        if prio >= 2 && (BIG_STRIDE / prio as usize) >= 2 {
+        if prio >= 2 {
             let mut inner = self.inner_exclusive_access();
             inner.priority = prio;
             inner.stride = BIG_STRIDE / prio as usize;
-            return 0;
+            return prio;
         }
         -1
+    }
+    pub fn task_info(&self)->TaskInfo {
+        let inner = self.inner.exclusive_access();
+        TaskInfo {
+            status: inner.task_status,
+            syscall_times: inner.syscall_times,
+            time: (get_time_us() - inner.time) / 1000,
+        }
     }
 }
 

@@ -17,13 +17,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::loader::get_app_data_by_name;
+use crate::{loader::get_app_data_by_name, timer::get_time_us};
 use alloc::sync::Arc;
 use lazy_static::*;
 use manager::fetch_task;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
+pub use processor::get_cur_task_info;
 pub use context::TaskContext;
 pub use manager::add_task;
 pub use pid::{pid_alloc, KernelStack, PidHandle};
@@ -42,6 +42,7 @@ pub fn suspend_current_and_run_next() {
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
     task_inner.pass += task_inner.stride;
+    if task_inner.time == 0 {task_inner.time = get_time_us();}
     drop(task_inner);
     // ---- release current PCB
 
@@ -98,3 +99,4 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
+

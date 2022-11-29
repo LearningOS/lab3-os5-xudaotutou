@@ -6,6 +6,7 @@ use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE};
 use crate::sync::UPSafeCell;
+use crate::task::current_task;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -252,6 +253,81 @@ impl MemorySet {
         //*self = Self::new_bare();
         self.areas.clear();
     }
+    pub fn mmap(&mut self, start: usize, end: usize, prot: usize) -> isize {
+        let (lvpn, rvpn) = (VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        let range = VPNRange::new(lvpn, rvpn);
+        if range
+            .into_iter()
+            .any(|vpn| match self.page_table.translate(vpn) {
+                Some(v) => {
+                    // println!("?1: {:?}, {:?}", vpn, v.ppn());
+                    // if v.ppn().0 == 0x0 {
+                    //     false
+                    // } else {
+                        true
+                    // }
+                }
+                None => false,
+            })
+        {
+            println!("already mapped");
+            return -1;
+        }
+        let mut permission = MapPermission::from_bits((prot as u8) << 1).unwrap();
+        permission.set(MapPermission::U, true);
+
+        self.insert_framed_area(start.into(), end.into(), permission);
+        0
+    }
+    pub fn munmap(&mut self, start: usize, end: usize) -> isize {
+        println!("unmap!!!,start: {:#x}, end: {:#x}", start, end);
+        let (start, end) = (VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        let range = VPNRange::new(start, end);
+        // println!("unmap!!!");
+        if range
+            .into_iter()
+            .any(|vpn| 
+                match self.page_table.translate(vpn) {
+                    Some(v) => {
+                        println!("?1: {:?}, {:?}", vpn, v.ppn());
+                        // if v.ppn().0 == 0x0 {
+                        //     true
+                        // } else {
+                            false
+                        // }
+                    }
+                    None => true,}
+            )
+        {
+            info!("[remove frame] not");
+            return -1;
+        }
+        let pte = &mut self.page_table;
+        self.areas.iter_mut().for_each(|area| {
+            let l = area.vpn_range.get_start();
+            let r = area.vpn_range.get_end();
+            info!(
+                "[unmap] [find]: l: {:?}, r: {:?}, start: {:?}, end: {:?}",
+                l, r, start, end
+            );
+            if start <= l && r <= end {
+                info!("[unmap]: success,l,r:({:?}, {:?})", l, r);
+                // match self.translate(l) {
+                //     Some(v) => info!("male {:?}", v.ppn()),
+                //     None => info!("yes"),
+                // }
+                area.unmap(pte);
+            }
+        });
+        self.areas.retain(|area|area.vpn_range.get_start() > area.vpn_range.get_start());
+        info!("[unmap] [test] ");
+        range.into_iter().for_each(|vpn| match self.translate(vpn) {
+            Some(v) => info!("male {:?}", v.ppn()),
+            None => info!("yes"),
+        });
+        0
+    }
+    
 }
 
 /// map area structure, controls a contiguous piece of virtual memory
@@ -351,6 +427,41 @@ impl MapArea {
 pub enum MapType {
     Identical,
     Framed,
+}
+
+pub fn mmap(start: usize, len: usize, prot: usize) -> isize {
+    if len == 0 {
+        info!("reason1");
+        return 0;
+    }
+    // 0，1，2位有效，其他位必须为0,mask => b 0...0111 =>0x7
+    if (prot >> 3) != 0 || (prot & 0x7) == 0 || start % 4096 != 0 {
+        info!("reason2");
+        return -1;
+    }
+    if let Some(cur_tcb) = current_task() {
+        let mut inner = cur_tcb.inner_exclusive_access();
+        let end = start + len;
+        println!("mmap!!!");
+        inner.memory_set.mmap(start, end, prot)
+    } else {
+        -1
+    }
+}
+
+pub fn munmap(start: usize, len: usize) -> isize {
+    if len == 0 {
+        return 0;
+    }
+    if start % 4096 != 0 {
+        return -1;
+    }
+    if let Some(cur_tcb) = current_task() {
+        let mut inner = cur_tcb.inner_exclusive_access();
+        inner.memory_set.munmap(start, start + len)
+    } else {
+        -1
+    }
 }
 
 bitflags! {
