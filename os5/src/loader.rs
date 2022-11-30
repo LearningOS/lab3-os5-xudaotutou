@@ -1,6 +1,9 @@
+//! Loading user applications into memory
+
 use alloc::vec::Vec;
 use lazy_static::*;
 
+/// Get the total number of applications.
 pub fn get_num_app() -> usize {
     extern "C" {
         fn _num_app();
@@ -8,6 +11,7 @@ pub fn get_num_app() -> usize {
     unsafe { (_num_app as usize as *const usize).read_volatile() }
 }
 
+/// get applications data
 pub fn get_app_data(app_id: usize) -> &'static [u8] {
     extern "C" {
         fn _num_app();
@@ -25,6 +29,7 @@ pub fn get_app_data(app_id: usize) -> &'static [u8] {
 }
 
 lazy_static! {
+    /// A global read-only vector for saving app names
     static ref APP_NAMES: Vec<&'static str> = {
         let num_app = get_num_app();
         extern "C" {
@@ -48,6 +53,7 @@ lazy_static! {
     };
 }
 
+/// Get elf data by app name
 pub fn get_app_data_by_name(name: &str) -> Option<&'static [u8]> {
     let num_app = get_num_app();
     (0..num_app)
@@ -55,6 +61,7 @@ pub fn get_app_data_by_name(name: &str) -> Option<&'static [u8]> {
         .map(get_app_data)
 }
 
+/// Print all of app names during kernel initialization
 pub fn list_apps() {
     println!("/**** APPS ****");
     for app in APP_NAMES.iter() {
