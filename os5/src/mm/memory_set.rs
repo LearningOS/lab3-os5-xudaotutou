@@ -256,78 +256,150 @@ impl MemorySet {
     pub fn mmap(&mut self, start: usize, end: usize, prot: usize) -> isize {
         let (lvpn, rvpn) = (VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
         let range = VPNRange::new(lvpn, rvpn);
-        if range
-            .into_iter()
-            .any(|vpn| match self.page_table.translate(vpn) {
-                Some(v) => {
-                    // println!("?1: {:?}, {:?}", vpn, v.ppn());
-                    // if v.ppn().0 == 0x0 {
-                    //     false
-                    // } else {
-                        true
-                    // }
-                }
-                None => false,
-            })
+
+        self.areas.iter().for_each(|area| {
+            info!("l, r, {:?}, {:?}", area.vpn_range.get_start(), area.vpn_range.get_end());
+        });
+        info!(
+            "[map]: lvpn: {:?}, rvpn: {:?}, start: {:#x},end: {:#x}, pt: {:#x}",
+            lvpn,
+            rvpn,
+            start,
+            end,
+            self.page_table.token()
+        );
+        if self
+            .areas
+            .iter()
+            .any(|area| area.vpn_range.get_end() > area.vpn_range.get_start() && lvpn < area.vpn_range.get_end() && rvpn > area.vpn_range.get_start())
         {
+            // [start, end)
             println!("already mapped");
+            info!("end,{:?}",self.page_table.translate(rvpn).unwrap().ppn());
             return -1;
         }
         let mut permission = MapPermission::from_bits((prot as u8) << 1).unwrap();
         permission.set(MapPermission::U, true);
 
-        self.insert_framed_area(start.into(), end.into(), permission);
+        self.insert_framed_area(lvpn.into(), rvpn.into(), permission);
+
+        info!("[map] [test] ");
+        range.into_iter().for_each(|vpn| {
+            match self.translate(vpn) {
+                Some(v) => info!("yes {:?}", v.ppn()),
+                None => info!("male"),
+            };
+        });
+        // self.areas.iter().for_each(|area| {
+        //     let (lvpn, rvpn) = (area.get_start(), area.get_end());
+        //     info!(
+        //         "l, r, {:?}, {:?}, {:?}, {:?}",
+        //         area.get_start(),
+        //         area.get_end(),
+        //         self.translate(lvpn).unwrap().ppn(),
+        //         self.translate(rvpn).unwrap().ppn()
+        //     );
+        // });
+        // show_frame_status();
         0
     }
     pub fn munmap(&mut self, start: usize, end: usize) -> isize {
         println!("unmap!!!,start: {:#x}, end: {:#x}", start, end);
-        let (start, end) = (VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
-        let range = VPNRange::new(start, end);
+        let (lvpn, rvpn) = (VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        let range = VPNRange::new(lvpn, rvpn);
         // println!("unmap!!!");
-        if range
-            .into_iter()
-            .any(|vpn| 
-                match self.page_table.translate(vpn) {
-                    Some(v) => {
-                        println!("?1: {:?}, {:?}", vpn, v.ppn());
-                        // if v.ppn().0 == 0x0 {
-                        //     true
-                        // } else {
-                            false
-                        // }
-                    }
-                    None => true,}
-            )
+        if self
+            .areas
+            .iter()
+            .filter_map(|area| {
+                let (start, end) = (area.vpn_range.get_start(), area.vpn_range.get_end());
+                if start >= lvpn && end <= rvpn {
+                    Some(end.0 - start.0)
+                } else {
+                    None
+                }
+            })
+            .sum::<usize>()
+            < (rvpn.0 - lvpn.0)
         {
-            info!("[remove frame] not");
+            println!("already mapped");
             return -1;
         }
+        // if range
+        //     .into_iter()
+        //     .any(|vpn|
+        //         match self.page_table.translate(vpn) {
+        //             Some(v) => {
+        //                 // println!("?1: {:?}, {:?}", vpn, v.ppn());
+        //                 // if v.ppn().0 == 0x0 {
+        //                 //     true
+        //                 // } else {
+        //                     false
+        //                 // }
+        //             }
+        //             None => true,}
+        //     )
+        // {
+        //     info!("[remove frame] not");
+        //     return -1;
+        // }
+        // info!("unmap!!! real pt: {:#x}", self.page_table.token());
+        // self.areas = self
+        //     .areas
+        //     .to_owned()
+        //     .into_iter()
+        //     .filter_map(|mut area| {
+        //         show_frame_status();
+        //         因为自动drop会导致回收行为，丢失所有权就寄了
+        //         let l = area.get_start();
+        //         let r = area.get_end();
+        //         info!(
+        //             "[unmap] [find]: l: {:?}, r: {:?}, start: {:?}, end: {:?}",
+        //             l, r, start, end
+        //         );
+        //         if l < r && start <= l && r <= end {
+        //             info!("[unmap]: success,l,r:({:?}, {:?})", l, r);
+        //             match self.translate(l) {
+        //                 Some(v) => info!("male {:?}", v.ppn()),
+        //                 None => info!("yes"),
+        //             }
+        //             area.unmap(&mut self.page_table);
+        //             None
+        //         } else {
+        //             Some(area)
+        //         }
+        //     })
+        //     .collect::<Vec<MapArea>>();
         let pte = &mut self.page_table;
         self.areas.iter_mut().for_each(|area| {
             let l = area.vpn_range.get_start();
             let r = area.vpn_range.get_end();
             info!(
                 "[unmap] [find]: l: {:?}, r: {:?}, start: {:?}, end: {:?}",
-                l, r, start, end
+                l, r, lvpn, rvpn
             );
-            if start <= l && r <= end {
+            if lvpn <= l && r <= rvpn {
                 info!("[unmap]: success,l,r:({:?}, {:?})", l, r);
                 // match self.translate(l) {
                 //     Some(v) => info!("male {:?}", v.ppn()),
                 //     None => info!("yes"),
                 // }
                 area.unmap(pte);
+                area.vpn_range = VPNRange::new(l, l);
             }
         });
-        self.areas.retain(|area|area.vpn_range.get_start() > area.vpn_range.get_start());
+        self.areas.retain(|area| area.vpn_range.get_start() < area.vpn_range.get_end());
         info!("[unmap] [test] ");
+        self.areas.iter().for_each(|area| {
+            info!("l, r, {:?}, {:?}", area.vpn_range.get_start(), area.vpn_range.get_end());
+        });
         range.into_iter().for_each(|vpn| match self.translate(vpn) {
-            Some(v) => info!("male {:?}", v.ppn()),
+            Some(v) => info!("male {:?}, {:?}", vpn, v.ppn()),
             None => info!("yes"),
         });
         0
     }
-    
+      
 }
 
 /// map area structure, controls a contiguous piece of virtual memory
